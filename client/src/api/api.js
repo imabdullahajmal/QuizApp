@@ -1,6 +1,8 @@
 import axios from 'axios';
 
-const baseURL = import.meta.env.VITE_API_URL || '';
+// Default to localhost:3000 when VITE_API_URL is not set so the client
+// always targets the backend running on port 3000 during development.
+const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 const api = axios.create({
   baseURL,
