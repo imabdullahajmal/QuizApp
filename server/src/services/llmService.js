@@ -7,7 +7,10 @@
 
 import process from "process";
 
-const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+// Gemini / Google Generative AI adapter
+// If you have a custom Gemini-compatible endpoint, set GEMINI_API_URL.
+// Prefer GEMINI_API_KEY, fallback to LLM_API_KEY for compatibility.
+const DEFAULT_GEMINI_MODEL_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta2/models/text-bison-001:generate";
 
 function dummyQuiz(topic = "General Knowledge") {
   const title = `Quick Quiz: ${topic}`;
@@ -31,37 +34,77 @@ function dummyQuiz(topic = "General Knowledge") {
   return { title, questions };
 }
 
-async function callOpenAI(prompt, apiKey) {
+async function callGemini(prompt, apiKey) {
   // Use global fetch (Node 18+) — if not available, the caller will handle falling back to dummy data.
   if (typeof fetch !== "function") {
     throw new Error("fetch is not available in this environment");
   }
 
-  const body = {
-    model: "gpt-3.5-turbo",
-    messages: [{ role: "system", content: "You are a helpful assistant that outputs JSON only." }, { role: "user", content: prompt }],
-    temperature: 0.7,
-    max_tokens: 800
-  };
+  // Allow explicit GEMINI_API_URL to be set for custom endpoints / proxies
+  const customUrl = process.env.GEMINI_API_URL;
+  let url;
+  let init;
 
-  const res = await fetch(OPENAI_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(body)
-  });
+  if (customUrl) {
+    url = customUrl;
+    init = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({ prompt })
+    };
+  } else {
+    // Best-effort Google Generative API v1beta2 call using API key as query param.
+    // Allow overriding the default model endpoint via GEMINI_MODEL_ENDPOINT in .env.
+    const endpoint = process.env.GEMINI_MODEL_ENDPOINT || DEFAULT_GEMINI_MODEL_ENDPOINT;
+    // Note: users may need to set GEMINI_API_URL for their setup. This is a safe fallback.
+    url = `${endpoint}?key=${encodeURIComponent(apiKey)}`;
+    const body = {
+      prompt: { text: prompt },
+      temperature: 0.7,
+      maxOutputTokens: 800
+    };
+    init = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    };
+  }
 
+  const res = await fetch(url, init);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`OpenAI error: ${res.status} ${res.statusText} ${txt}`);
+    throw new Error(`Gemini/Generative API error: ${res.status} ${res.statusText} ${txt}`);
   }
 
   const data = await res.json();
-  // assistant message content
-  const assistant = data?.choices?.[0]?.message?.content;
-  if (!assistant) throw new Error("No assistant content returned from OpenAI");
+
+  // Try a few common response shapes (Google Generative API uses candidates)
+  // Candidates may have `output`, or `content` arrays — collect text pieces.
+  let assistant = null;
+  try {
+    if (typeof data === 'string') assistant = data;
+    else if (data?.candidates && Array.isArray(data.candidates) && data.candidates[0]) {
+      const cand = data.candidates[0];
+      if (typeof cand.output === 'string') assistant = cand.output;
+      else if (Array.isArray(cand.content)) {
+        assistant = cand.content.map(c => (typeof c === 'string' ? c : c?.text || '')).join('\n');
+      } else if (typeof cand.text === 'string') assistant = cand.text;
+    } else if (data?.choices && Array.isArray(data.choices) && data.choices[0]) {
+      // some endpoints return choices similar to OpenAI shape
+      assistant = data.choices[0]?.message?.content || data.choices[0]?.text || null;
+    }
+  } catch (e) {
+    assistant = null;
+  }
+
+  if (!assistant) {
+    // Fallback: try to stringify the whole response if nothing else
+    assistant = JSON.stringify(data);
+  }
+
   return assistant;
 }
 
@@ -87,7 +130,8 @@ function extractJson(text) {
 }
 
 export async function generateQuiz(topic = "General Knowledge") {
-  const apiKey = process.env.LLM_API_KEY;
+  // Prefer explicit GEMINI_API_KEY, fallback to LLM_API_KEY for compatibility
+  const apiKey = process.env.GEMINI_API_KEY || process.env.LLM_API_KEY;
   if (!apiKey) {
     return dummyQuiz(topic);
   }
@@ -96,7 +140,7 @@ export async function generateQuiz(topic = "General Knowledge") {
   const prompt = `Create a short quiz about the topic \"${topic}\". Respond with JSON only in the following shape:\n{\n  \"title\": string,\n  \"questions\": [\n    { \"question\": string, \"options\": [string], \"answer\": string }\n  ]\n}\nMake 3-6 questions. Ensure each question has 3-4 options and the answer field matches exactly one option.`;
 
   try {
-    const assistantText = await callOpenAI(prompt, apiKey);
+  const assistantText = await callGemini(prompt, apiKey);
     const parsed = extractJson(assistantText);
     if (parsed && parsed.title && Array.isArray(parsed.questions)) {
       // Basic validation/normalization: ensure options are arrays of strings and answer is string
