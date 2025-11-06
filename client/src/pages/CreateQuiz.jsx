@@ -5,6 +5,8 @@ import Loader from '../components/Loader.jsx';
 
 const CreateQuiz = () => {
   const [topic, setTopic] = useState('');
+  const [numQuestions, setNumQuestions] = useState(3);
+  const [difficulty, setDifficulty] = useState('medium');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
@@ -13,7 +15,7 @@ const CreateQuiz = () => {
     if (!topic.trim()) return;
     setLoading(true);
     try {
-      const res = await api.post('/api/quizzes', { topic });
+      const res = await api.post('/api/quizzes', { topic, numQuestions, difficulty });
       const saved = res.data;
       navigate(`/quiz/${saved._id}`);
     } catch (err) {
@@ -31,6 +33,20 @@ const CreateQuiz = () => {
         <label>
           Topic
           <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="e.g. JavaScript basics" style={{ width: '100%', padding: 8, marginTop: 6 }} />
+        </label>
+
+        <label>
+          Number of questions
+          <input type="number" min={1} max={50} value={numQuestions} onChange={(e) => setNumQuestions(Number(e.target.value))} style={{ width: '100%', padding: 8, marginTop: 6 }} />
+        </label>
+
+        <label>
+          Difficulty
+          <select value={difficulty} onChange={(e) => setDifficulty(e.target.value)} style={{ width: '100%', padding: 8, marginTop: 6 }}>
+            <option value="easy">Easy</option>
+            <option value="medium">Medium</option>
+            <option value="hard">Hard</option>
+          </select>
         </label>
 
         <div>

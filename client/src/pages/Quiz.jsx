@@ -42,6 +42,10 @@ const Quiz = () => {
   return (
     <div style={{ maxWidth: 800, margin: '24px auto', padding: 12 }}>
       <h2>{quiz.title}</h2>
+      <div style={{ color: '#666', marginBottom: 12 }}>
+        {quiz.difficulty ? `Difficulty: ${quiz.difficulty.charAt(0).toUpperCase() + quiz.difficulty.slice(1)}` : null}
+        {quiz.numQuestions ? ` • ${quiz.numQuestions} questions` : null}
+      </div>
       <form onSubmit={handleSubmit} style={{ display: 'grid', gap: 12 }}>
         {quiz.questions.map((q, idx) => (
           <div key={idx} style={{ padding: 12, border: '1px solid #eee', borderRadius: 6 }}>

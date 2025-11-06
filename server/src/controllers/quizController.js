@@ -3,17 +3,39 @@ import llmService from "../services/llmService.js";
 
 export async function createQuiz(req, res) {
 	try {
-		const { topic } = req.body || {};
+		const { topic, numQuestions, difficulty } = req.body || {};
 		if (!topic || typeof topic !== "string") {
 			return res.status(400).json({ error: "Missing or invalid 'topic' in request body" });
 		}
 
+		// Validate numQuestions (optional) — coerce to integer and clamp
+		let count = 3;
+		if (numQuestions !== undefined) {
+			const n = Number(numQuestions);
+			if (!Number.isInteger(n) || n < 1 || n > 50) {
+				return res.status(400).json({ error: "'numQuestions' must be an integer between 1 and 50" });
+			}
+			count = n;
+		}
+
+		// Validate difficulty (optional)
+		const allowed = ["easy", "medium", "hard"];
+		let level = "medium";
+		if (difficulty !== undefined) {
+			if (typeof difficulty !== "string" || !allowed.includes(difficulty.toLowerCase())) {
+				return res.status(400).json({ error: "'difficulty' must be one of: easy, medium, hard" });
+			}
+			level = difficulty.toLowerCase();
+		}
+
 		// Ask LLM service to generate quiz content
-		const generated = await llmService.generateQuiz(topic);
+		const generated = await llmService.generateQuiz(topic, { numQuestions: count, difficulty: level });
 
 		const quiz = new Quiz({
-			title: generated.title || `Quiz: ${topic}`,
-			questions: Array.isArray(generated.questions) ? generated.questions : []
+				title: generated.title || `Quiz: ${topic}`,
+				numQuestions: generated.questions ? generated.questions.length : count,
+				difficulty: level,
+				questions: Array.isArray(generated.questions) ? generated.questions : []
 		});
 
 		const saved = await quiz.save();

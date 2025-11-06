@@ -1,161 +1,199 @@
 /*
-  Lightweight LLM service for generating quizzes.
-  - If process.env.LLM_API_KEY is present, it will attempt to call OpenAI's Chat Completions API (gpt-3.5-turbo) and parse JSON output.
-  - If no API key is present, returns a deterministic dummy quiz for the given topic.
-  Keep this simple and resilient: parsing failures fall back to dummy content.
+  Stable Gemini-first quiz generator.
+  - Ensures always-valid JSON.
+  - Cleans malformed LLM output.
+  - Guarantees answers always exist inside options.
 */
 
 import process from "process";
 
-// Gemini / Google Generative AI adapter
-// If you have a custom Gemini-compatible endpoint, set GEMINI_API_URL.
-// Prefer GEMINI_API_KEY, fallback to LLM_API_KEY for compatibility.
-const DEFAULT_GEMINI_MODEL_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta2/models/text-bison-001:generate";
+const DEFAULT_MODEL =
+  process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
-function dummyQuiz(topic = "General Knowledge") {
+const DEFAULT_ENDPOINT =
+  process.env.GEMINI_MODEL_ENDPOINT ||
+  `https://generativelanguage.googleapis.com/v1beta2/models/${DEFAULT_MODEL}:generate`;
+
+/* ------------------------- Dummy Quiz Fallback ------------------------- */
+function dummyQuiz(topic = "General Knowledge", num = 3, difficulty = "medium") {
   const title = `Quick Quiz: ${topic}`;
-  const questions = [
-    {
-      question: `What is the main topic of this quiz?`,
-      options: [topic, "Math", "History", "Science"],
-      answer: topic
-    },
-    {
+  const list = [];
+
+  for (let i = 1; i <= num; i++) {
+    list.push({
+      // keep question concise and without numbering/difficulty tags
       question: `Which statement best describes ${topic}?`,
-      options: ["Option A", "Option B", "Option C", "Option D"],
-      answer: "Option A"
-    },
-    {
-      question: `Which of these is related to ${topic}?`,
-      options: ["Related 1", "Related 2", "Related 3", "Related 4"],
-      answer: "Related 1"
-    }
-  ];
-  return { title, questions };
+      options: [
+        `${topic} example ${i}`,
+        `Distractor ${i}A`,
+        `Distractor ${i}B`,
+        `Distractor ${i}C`
+      ],
+      answer: `${topic} example ${i}`
+    });
+  }
+
+  return { title, questions: list };
 }
 
-async function callGemini(prompt, apiKey) {
-  // Use global fetch (Node 18+) — if not available, the caller will handle falling back to dummy data.
-  if (typeof fetch !== "function") {
-    throw new Error("fetch is not available in this environment");
-  }
+/* ------------------------- JSON Extraction ------------------------- */
+function extractJsonSafe(text) {
+  if (!text) return null;
 
-  // Allow explicit GEMINI_API_URL to be set for custom endpoints / proxies
-  const customUrl = process.env.GEMINI_API_URL;
-  let url;
-  let init;
+  text = text.replace(/```json|```/g, "");
 
-  if (customUrl) {
-    url = customUrl;
-    init = {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({ prompt })
-    };
-  } else {
-    // Best-effort Google Generative API v1beta2 call using API key as query param.
-    // Allow overriding the default model endpoint via GEMINI_MODEL_ENDPOINT in .env.
-    const endpoint = process.env.GEMINI_MODEL_ENDPOINT || DEFAULT_GEMINI_MODEL_ENDPOINT;
-    // Note: users may need to set GEMINI_API_URL for their setup. This is a safe fallback.
-    url = `${endpoint}?key=${encodeURIComponent(apiKey)}`;
-    const body = {
-      prompt: { text: prompt },
-      temperature: 0.7,
-      maxOutputTokens: 800
-    };
-    init = {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    };
-  }
-
-  const res = await fetch(url, init);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Gemini/Generative API error: ${res.status} ${res.statusText} ${txt}`);
-  }
-
-  const data = await res.json();
-
-  // Try a few common response shapes (Google Generative API uses candidates)
-  // Candidates may have `output`, or `content` arrays — collect text pieces.
-  let assistant = null;
   try {
-    if (typeof data === 'string') assistant = data;
-    else if (data?.candidates && Array.isArray(data.candidates) && data.candidates[0]) {
-      const cand = data.candidates[0];
-      if (typeof cand.output === 'string') assistant = cand.output;
-      else if (Array.isArray(cand.content)) {
-        assistant = cand.content.map(c => (typeof c === 'string' ? c : c?.text || '')).join('\n');
-      } else if (typeof cand.text === 'string') assistant = cand.text;
-    } else if (data?.choices && Array.isArray(data.choices) && data.choices[0]) {
-      // some endpoints return choices similar to OpenAI shape
-      assistant = data.choices[0]?.message?.content || data.choices[0]?.text || null;
-    }
-  } catch (e) {
-    assistant = null;
-  }
-
-  if (!assistant) {
-    // Fallback: try to stringify the whole response if nothing else
-    assistant = JSON.stringify(data);
-  }
-
-  return assistant;
-}
-
-function extractJson(text) {
-  // Try to find a JSON object in the text and parse it.
-  try {
-    // If the whole text is JSON, parse directly.
     return JSON.parse(text);
-  } catch (e) {
-    // Otherwise try to extract the first {...} block.
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start !== -1 && end !== -1 && end > start) {
-      const sub = text.slice(start, end + 1);
-      try {
-        return JSON.parse(sub);
-      } catch (e2) {
-        // fall through
-      }
-    }
+  } catch (_) {}
+
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch (_) {}
   }
   return null;
 }
 
-export async function generateQuiz(topic = "General Knowledge") {
-  // Prefer explicit GEMINI_API_KEY, fallback to LLM_API_KEY for compatibility
-  const apiKey = process.env.GEMINI_API_KEY || process.env.LLM_API_KEY;
-  if (!apiKey) {
-    return dummyQuiz(topic);
+// sanitize leading numbering / difficulty tags and trim
+function sanitizeText(s) {
+  if (s == null) return "";
+  let out = String(s).trim();
+  // remove leading numbering like '1. ' or '1) '
+  out = out.replace(/^\s*\d+[\.)]?\s*/, "");
+  // remove leading difficulty tags like '(Medium)' or 'Medium:'
+  out = out.replace(/^\s*\(?\s*(Easy|Medium|Hard)\s*\)?[:\-\)]?\s*/i, "");
+  return out.trim();
+}
+
+/* ------------------------- Normalization Layer ------------------------- */
+function normalizeQuiz(parsed, topic, num, difficulty) {
+  if (!parsed || !Array.isArray(parsed.questions)) return null;
+
+  const out = {
+    title: parsed.title || `Quick Quiz: ${topic}`,
+    questions: []
+  };
+
+  for (const q of parsed.questions.slice(0, num)) {
+    // sanitize question/options/answer
+    const questionText = sanitizeText(q.question || `A question about ${topic}`);
+    let opts = Array.isArray(q.options) ? q.options.map(o => sanitizeText(String(o))) : [];
+    let ans = sanitizeText(q.answer || "");
+
+    // ensure unique, trimmed options
+    opts = opts.map(o => (o || "")).filter((v, i, a) => v && a.indexOf(v) === i);
+
+    while (opts.length < 3) opts.push(`Option ${opts.length + 1}`);
+
+    if (!opts.includes(ans)) {
+      // put answer at front if it's non-empty, otherwise keep opts as-is
+      if (ans) opts.unshift(ans);
+    }
+
+    // ensure max 4 options
+    opts = opts.slice(0, 4);
+
+    const chosenAnswer = ans && opts.includes(ans) ? ans : opts[0];
+
+    out.questions.push({
+      question: questionText,
+      options: opts,
+      answer: chosenAnswer
+    });
   }
 
-  // Build a prompt that asks for JSON containing title and questions with options+answer.
-  const prompt = `Create a short quiz about the topic \"${topic}\". Respond with JSON only in the following shape:\n{\n  \"title\": string,\n  \"questions\": [\n    { \"question\": string, \"options\": [string], \"answer\": string }\n  ]\n}\nMake 3-6 questions. Ensure each question has 3-4 options and the answer field matches exactly one option.`;
+  return out.questions.length === num ? out : null;
+}
+
+/* ------------------------- Gemini Caller ------------------------- */
+async function callGemini(prompt, apiKey) {
+  const customUrl = process.env.GEMINI_API_URL;
+
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey && customUrl) headers.Authorization = `Bearer ${apiKey}`;
+
+  const body = {
+    prompt: { text: prompt },
+    temperature: 0.3,
+    maxOutputTokens: 600
+  };
+
+  const url = customUrl
+    ? customUrl
+    : `${DEFAULT_ENDPOINT}?key=${encodeURIComponent(apiKey)}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body)
+  });
+
+  const json = await res.json();
+
+  const cand = json?.candidates?.[0];
+  if (!cand) return null;
+
+  if (typeof cand.output === "string") return cand.output;
+  if (cand.text) return cand.text;
+
+  if (Array.isArray(cand.content)) {
+    return cand.content.map(c => c?.text || c).join("\n");
+  }
+
+  return JSON.stringify(json);
+}
+
+/* ------------------------- Main Quiz Generator ------------------------- */
+export async function generateQuiz(topic = "General Knowledge", options = {}) {
+  const num = Number(options.numQuestions) || 3;
+  const difficulty = (options.difficulty || "medium").toLowerCase();
+
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.LLM_API_KEY ||
+    process.env.GOOGLE_API_KEY;
+
+  const hasCustom =
+    Boolean(process.env.GEMINI_API_URL || process.env.GEMINI_MODEL_ENDPOINT);
+
+  if (!apiKey && !hasCustom) {
+    return dummyQuiz(topic, num, difficulty);
+  }
+
+  const prompt = `
+Respond with VALID JSON ONLY. No markdown. No explanation.
+
+{
+  "title": "Quick Quiz: ${topic}",
+  "questions": [
+    {
+      "question": "...",
+      "options": ["A", "B", "C"],
+      "answer": "A"
+    }
+  ]
+}
+
+Rules:
+- EXACTLY ${num} questions.
+- Each "options" array must have 3–4 strings.
+- "answer" MUST match one of the options.
+- NO numbering inside questions.
+- Questions must match difficulty: ${difficulty}.
+`;
 
   try {
-  const assistantText = await callGemini(prompt, apiKey);
-    const parsed = extractJson(assistantText);
-    if (parsed && parsed.title && Array.isArray(parsed.questions)) {
-      // Basic validation/normalization: ensure options are arrays of strings and answer is string
-      const questions = parsed.questions.map((q) => ({
-        question: String(q.question || ""),
-        options: Array.isArray(q.options) ? q.options.map(String) : [],
-        answer: String(q.answer || "")
-      }));
-      return { title: String(parsed.title), questions };
-    }
-    // Fallback
-    return dummyQuiz(topic);
+    const raw = await callGemini(prompt, apiKey);
+    const parsed = extractJsonSafe(raw);
+    const cleaned = normalizeQuiz(parsed, topic, num, difficulty);
+
+    if (cleaned) return cleaned;
+    return dummyQuiz(topic, num, difficulty);
   } catch (err) {
-    // On any error, return dummy quiz — keep API resilient
-    return dummyQuiz(topic);
+    console.error("LLM error:", err);
+    return dummyQuiz(topic, num, difficulty);
   }
 }
 
